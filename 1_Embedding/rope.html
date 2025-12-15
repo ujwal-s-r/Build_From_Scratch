@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Researcher's Lab: 3D RoPE Visualization</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: 'Segoe UI', sans-serif; color: white; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        
+        /* The Researcher's Control Panel */
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 8px;
+            width: 300px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        h2 { margin: 0 0 10px 0; font-size: 18px; color: #4facfe; }
+        .control-group { margin-bottom: 15px; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        label { display: block; font-size: 12px; margin-bottom: 5px; color: #ccc; }
+        input[type=range] { width: 100%; cursor: pointer; }
+        .value-display { float: right; font-weight: bold; color: #fff; }
+        
+        /* Stats Box */
+        #stats {
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 13px;
+            color: #00ff88;
+        }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+        
+        .legend { display: flex; align-items: center; font-size: 11px; margin-top: 5px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="controls">
+        <h2>RoPE Mechanics Lab</h2>
+        
+        <div class="control-group">
+            <div class="legend"><div class="dot" style="background:#ff3366"></div>Query Vector (Start)</div>
+            <label>Position Index (m): <span id="pos-q-val" class="value-display">0</span></label>
+            <input type="range" id="pos-q" min="0" max="100" value="0" step="1">
+        </div>
+
+        <div class="control-group">
+            <div class="legend"><div class="dot" style="background:#00ccff"></div>Key Vector (Target)</div>
+            <label>Position Index (n): <span id="pos-k-val" class="value-display">0</span></label>
+            <input type="range" id="pos-k" min="0" max="100" value="0" step="1">
+        </div>
+
+        <div class="control-group">
+            <label>Base Angle (Semantic Difference): <span id="base-angle-val" class="value-display">30°</span></label>
+            <input type="range" id="base-angle" min="0" max="180" value="30">
+        </div>
+
+        <div id="stats">
+            <div class="stat-row"><span>Relative Dist (m-n):</span> <span id="rel-dist">0</span></div>
+            <div class="stat-row"><span>Dot Product:</span> <span id="dot-prod">1.00</span></div>
+            <div class="stat-row" style="color:#aaa; font-size:11px;">(Notice: Dot product depends ONLY on relative distance!)</div>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+        import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+
+        // --- 1. SCENE SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111111);
+        scene.fog = new THREE.Fog(0x111111, 10, 50);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(5, 5, 8);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        // --- 2. HELPERS (Grid, Axes) ---
+        const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+        scene.add(gridHelper);
+
+        // The "Unit Circle" floor to visualize rotation path
+        const circleGeometry = new THREE.RingGeometry(2.9, 3.0, 64);
+        const circleMaterial = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide });
+        const orbitRing = new THREE.Mesh(circleGeometry, circleMaterial);
+        orbitRing.rotation.x = -Math.PI / 2;
+        scene.add(orbitRing);
+
+        // --- 3. ROPE MATH LOGIC ---
+        // Simulating a standard Transformer d_model=64, but we visualize just one pair (dim 0 and 1)
+        const d_model = 64; 
+        const theta_base = 10000;
+        
+        // We look at the first pair of dimensions (i=0)
+        // Frequency theta = 10000^(-2*0/d) = 10000^0 = 1
+        // Actually, let's use a slightly slower frequency for visualization purposes so it doesn't spin too fast
+        const visual_freq = 0.1; 
+
+        function getRoPERotation(position, baseVec) {
+            // RoPE Rotation Matrix:
+            // [cos(m*theta)  -sin(m*theta)]
+            // [sin(m*theta)   cos(m*theta)]
+            
+            const angle = position * visual_freq;
+            const x = baseVec.x;
+            const z = baseVec.z; // We use Z instead of Y for 3D floor plane visualization
+
+            const x_rot = x * Math.cos(angle) - z * Math.sin(angle);
+            const z_rot = x * Math.sin(angle) + z * Math.cos(angle);
+
+            return new THREE.Vector3(x_rot, 0, z_rot);
+        }
+
+        // --- 4. OBJECTS ---
+        
+        // Base vectors (Unrotated semantics) - Length 3 for visibility
+        // Q starts at 0 deg, K starts at 30 deg offset
+        let vecQ_base = new THREE.Vector3(3, 0, 0); 
+        let vecK_base = new THREE.Vector3(3 * Math.cos(Math.PI/6), 0, 3 * Math.sin(Math.PI/6));
+
+        // Arrows
+        const origin = new THREE.Vector3(0, 0, 0);
+        const arrowQ = new THREE.ArrowHelper(vecQ_base.clone().normalize(), origin, 3, 0xff3366, 0.2, 0.1);
+        const arrowK = new THREE.ArrowHelper(vecK_base.clone().normalize(), origin, 3, 0x00ccff, 0.2, 0.1);
+        scene.add(arrowQ);
+        scene.add(arrowK);
+
+        // Trail dots setup
+        const MAX_TRAIL = 50;
+        const trailsQ = [];
+        const trailsK = [];
+        const trailGeo = new THREE.SphereGeometry(0.05, 8, 8);
+        const trailMatQ = new THREE.MeshBasicMaterial({ color: 0xff3366, transparent: true, opacity: 0.5 });
+        const trailMatK = new THREE.MeshBasicMaterial({ color: 0x00ccff, transparent: true, opacity: 0.5 });
+
+        // --- 5. UPDATE LOOP ---
+        function updateVectors() {
+            // Get input values
+            const posQ = parseInt(document.getElementById('pos-q').value);
+            const posK = parseInt(document.getElementById('pos-k').value);
+            const baseAngleDeg = parseInt(document.getElementById('base-angle').value);
+
+            // Update UI Labels
+            document.getElementById('pos-q-val').innerText = posQ;
+            document.getElementById('pos-k-val').innerText = posK;
+            document.getElementById('base-angle-val').innerText = baseAngleDeg + "°";
+            document.getElementById('rel-dist').innerText = Math.abs(posQ - posK);
+
+            // 1. Re-calculate Base K based on semantic angle slider
+            const baseAngleRad = baseAngleDeg * (Math.PI / 180);
+            vecK_base.set(3 * Math.cos(baseAngleRad), 0, 3 * Math.sin(baseAngleRad));
+
+            // 2. Apply RoPE Rotation
+            const rotQ = getRoPERotation(posQ, vecQ_base);
+            const rotK = getRoPERotation(posK, vecK_base);
+
+            // 3. Update 3D Arrows
+            arrowQ.setDirection(rotQ.clone().normalize());
+            arrowK.setDirection(rotK.clone().normalize());
+            arrowQ.setLength(3); // Reset length (ArrowHelper sometimes resizes)
+            arrowK.setLength(3);
+
+            // 4. Calculate Dot Product (Attention Score)
+            // Normalized dot product = Cosine Similarity
+            const dotProduct = rotQ.clone().normalize().dot(rotK.clone().normalize());
+            document.getElementById('dot-prod').innerText = dotProduct.toFixed(4);
+            
+            // Visual cue for Dot Product (Color change on stats)
+            const stats = document.getElementById('stats');
+            if(dotProduct > 0.9) stats.style.color = "#00ff88"; // High attention
+            else if(dotProduct < 0.2) stats.style.color = "#ff4444"; // Low attention
+            else stats.style.color = "#ffffff";
+
+            return { rotQ, rotK };
+        }
+
+        // Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            updateVectors();
+            renderer.render(scene, camera);
+        }
+
+        // Listeners
+        document.getElementById('pos-q').addEventListener('input', updateVectors);
+        document.getElementById('pos-k').addEventListener('input', updateVectors);
+        document.getElementById('base-angle').addEventListener('input', updateVectors);
+
+        // Handle Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
